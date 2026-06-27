@@ -2,7 +2,8 @@
 #  ЗАПОЛНИ ЭТИ ПОЛЯ ПЕРЕД ЗАПУСКОМ
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = "СЮДА_ТОКЕН_ОТ_BOTFATHER"
+import os
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 # Как часто проверять новые лоты (в секундах)
 CHECK_INTERVAL = 300  # 5 минут
