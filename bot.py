@@ -44,6 +44,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (update.effective_message.text or "").strip().lower()
+    if text in {"start", "старт", "начать", "привет", "hello", "hi"}:
+        await cmd_start(update, context)
+        return
+    await update.effective_message.reply_text("Я на месте. Напиши /start или /filter.")
+
+
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
     storage: Storage = context.application.bot_data["storage"]
@@ -53,6 +61,7 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Apify actor: <code>{settings.apify_actor}</code>\n"
         f"Check interval: <code>{settings.check_interval_seconds}s</code>\n"
         f"Max lots/check: <code>{settings.max_lots_per_check}</code>\n"
+        f"Extra query: <code>{settings.bid_cars_extra_query or '-'}</code>\n"
         f"Active subscriptions: <code>{active_count}</code>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -158,14 +167,58 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.edit_text("No matching lots found right now.")
 
 
+async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    settings: Settings = context.application.bot_data["settings"]
+    source: ApifyBidCarsSource = context.application.bot_data["source"]
+    chat_id = update.effective_chat.id
+    filters_obj = storage.get_filter(chat_id) or SearchFilters()
+
+    msg = await update.effective_message.reply_text("Running debug check...")
+    try:
+        lots = await source.fetch_lots(filters_obj, max_items=settings.max_lots_per_check)
+    except Exception as exc:
+        await msg.edit_text(f"Apify/source error: {exc}")
+        log.exception("Debug check failed")
+        return
+
+    seen = [lot for lot in lots if storage.is_seen(chat_id, lot.lot_id)]
+    unseen = [lot for lot in lots if not storage.is_seen(chat_id, lot.lot_id)]
+    first = "\n".join(
+        f"{idx + 1}. {lot.lot_id} | {lot.title[:45]} | seen={'yes' if storage.is_seen(chat_id, lot.lot_id) else 'no'}"
+        for idx, lot in enumerate(lots[:5])
+    )
+    text = (
+        "<b>Debug check</b>\n"
+        f"Fetched from Apify: <b>{len(lots)}</b>\n"
+        f"Unseen: <b>{len(unseen)}</b>\n"
+        f"Seen in DB: <b>{len(seen)}</b>\n"
+        f"Total seen for this chat: <b>{storage.seen_count(chat_id)}</b>\n\n"
+        f"<b>Filter</b>\n{format_filter(filters_obj)}\n\n"
+        f"<b>First lots</b>\n<pre>{first or '-'}</pre>"
+    )
+    await msg.edit_text(text, parse_mode=ParseMode.HTML)
+
+
+async def cmd_resetseen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    deleted = storage.clear_seen(update.effective_chat.id)
+    await update.effective_message.reply_text(
+        f"Seen cache cleared: {deleted} lot(s). Now /check or the next background cycle can send them again."
+    )
+
+
 async def check_all_subscriptions(context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.application.bot_data["storage"]
-    for chat_id in storage.active_chat_ids():
+    chat_ids = storage.active_chat_ids()
+    log.info("Background check started: active_chats=%s", len(chat_ids))
+    for chat_id in chat_ids:
         filters_obj = storage.get_filter(chat_id)
         if not filters_obj:
             continue
         try:
-            await send_lots_to_chat(context, chat_id, filters_obj, skip_seen=True)
+            sent = await send_lots_to_chat(context, chat_id, filters_obj, skip_seen=True)
+            log.info("Background check finished for chat_id=%s sent=%s", chat_id, sent)
             await asyncio.sleep(0.5)
         except Exception:
             log.exception("Background check failed for chat_id=%s", chat_id)
@@ -182,6 +235,7 @@ async def send_lots_to_chat(
     source: ApifyBidCarsSource = context.application.bot_data["source"]
 
     lots = await source.fetch_lots(filters_obj, max_items=settings.max_lots_per_check)
+    log.info("Fetched lots for chat_id=%s count=%s skip_seen=%s", chat_id, len(lots), skip_seen)
     sent = 0
     for lot in lots[:10]:
         if skip_seen and storage.is_seen(chat_id, lot.lot_id):
@@ -249,7 +303,7 @@ def is_yes(text: str | None) -> bool:
 def build_app(settings: Settings) -> Application:
     storage = Storage(settings.database_path)
     storage.init()
-    source = ApifyBidCarsSource(settings.apify_token, settings.apify_actor)
+    source = ApifyBidCarsSource(settings.apify_token, settings.apify_actor, settings.bid_cars_extra_query)
 
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.bot_data["settings"] = settings
@@ -274,9 +328,12 @@ def build_app(settings: Settings) -> Application:
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("myfilter", cmd_myfilter))
     app.add_handler(CommandHandler("check", cmd_check))
+    app.add_handler(CommandHandler("debugcheck", cmd_debugcheck))
+    app.add_handler(CommandHandler("resetseen", cmd_resetseen))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(filter_conv)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     app.job_queue.run_repeating(
         check_all_subscriptions,
