@@ -1,1 +1,0 @@
-"""Auto auction scout bot."""
