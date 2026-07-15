@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from math import ceil
 from typing import Any
 from urllib.parse import urlencode
 
@@ -22,16 +23,20 @@ class ApifyBidCarsSource:
 
     async def fetch_lots(self, filters: SearchFilters, max_items: int = 20) -> list[Lot]:
         search_url = build_search_url(filters, self.extra_query)
-        payload = {
-            "startUrls": [{"url": search_url}],
-            "maxItems": max_items,
-        }
-        params = {"token": self.token}
+        max_items = max(1, min(int(max_items), 100))
+        payload = build_actor_input(self.actor, search_url, max_items)
+        headers = {"Authorization": f"Bearer {self.token}"}
 
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(self.run_url, json=payload, params=params)
-            response.raise_for_status()
-            data = response.json()
+            response = await client.post(self.run_url, json=payload, headers=headers)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise ApifySourceError(describe_apify_error(exc.response.status_code)) from exc
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise ApifySourceError("Apify returned an invalid JSON response.") from exc
 
         if isinstance(data, dict):
             raw_items = data.get("items") or data.get("data") or []
@@ -41,13 +46,49 @@ class ApifyBidCarsSource:
             raw_items = []
 
         lots: list[Lot] = []
+        lot_ids: set[str] = set()
         for raw in raw_items:
             if not isinstance(raw, dict):
                 continue
             lot = normalize_lot(raw)
-            if lot and matches_filters(lot, filters):
+            if lot and lot.lot_id not in lot_ids and matches_filters(lot, filters):
                 lots.append(lot)
+                lot_ids.add(lot.lot_id)
         return lots
+
+
+class ApifySourceError(RuntimeError):
+    pass
+
+
+def describe_apify_error(status_code: int) -> str:
+    if status_code in (401, 403):
+        return (
+            "Apify denied access to the actor. Check that APIFY_TOKEN is valid, "
+            "the actor is available on your Apify account, and the actor subscription/payment is enabled."
+        )
+    if status_code == 404:
+        return "Apify actor was not found. Check APIFY_ACTOR."
+    if status_code == 408:
+        return "Apify actor timed out. Try a smaller MAX_LOTS_PER_CHECK or another actor."
+    return f"Apify request failed with HTTP {status_code}."
+
+
+def build_actor_input(actor: str, search_url: str, max_items: int) -> dict[str, Any]:
+    if actor == "shahidirfan~bid-cars-scraper":
+        return {
+            "url": search_url,
+            "results_wanted": max_items,
+            "max_pages": max(1, min(5, ceil(max_items / 20))),
+            "proxyConfiguration": {
+                "useApifyProxy": False,
+                "apifyProxyGroups": [],
+            },
+        }
+    return {
+        "startUrls": [{"url": search_url}],
+        "maxItems": max_items,
+    }
 
 
 def build_search_url(filters: SearchFilters, extra_query: str = "") -> str:
@@ -68,7 +109,7 @@ def build_search_url(filters: SearchFilters, extra_query: str = "") -> str:
 
 
 def normalize_lot(raw: dict[str, Any]) -> Lot | None:
-    title = _pick_str(raw, "title", "name", "vehicleName", "vehicle", "description")
+    title = _pick_str(raw, "title", "title_short", "name", "vehicleName", "vehicle", "description")
     year = _pick_int(raw, "year", "modelYear", "model_year") or _year_from_title(title)
     make = _pick_str(raw, "make", "brand", "manufacturer")
     model = _pick_str(raw, "model")
@@ -94,7 +135,7 @@ def normalize_lot(raw: dict[str, Any]) -> Lot | None:
     if not title or not url or not lot_id:
         return None
 
-    engine = _pick_str(raw, "engine", "engineSize", "engine_size")
+    engine = _pick_str(raw, "engine", "engineSize", "engine_size") or _pick_nested_str(raw, "specs", "engine")
     return Lot(
         lot_id=str(lot_id),
         source="bid.cars/apify",
@@ -110,9 +151,20 @@ def normalize_lot(raw: dict[str, Any]) -> Lot | None:
         damage=damage.upper() if damage else None,
         secondary_damage=secondary_damage.upper() if secondary_damage else None,
         run_and_drive=parse_run_and_drive(raw),
-        current_bid=_pick_money(raw, "currentBid", "current_bid", "prebidPrice", "salePrice", "price", "bid"),
+        current_bid=_pick_money(
+            raw,
+            "currentBid",
+            "current_bid",
+            "prebidPrice",
+            "prebid_price",
+            "final_bid",
+            "buy_now_price",
+            "salePrice",
+            "price",
+            "bid",
+        ),
         location=_pick_str(raw, "location", "yard", "auctionLocation"),
-        sale_date=_pick_str(raw, "saleDate", "sale_date", "auctionDate"),
+        sale_date=_pick_str(raw, "saleDate", "sale_date", "auctionDate", "prebid_close_time"),
         url=url,
         image_url=_pick_image(raw),
         raw=raw,
@@ -120,19 +172,20 @@ def normalize_lot(raw: dict[str, Any]) -> Lot | None:
 
 
 def matches_filters(lot: Lot, filters: SearchFilters) -> bool:
-    if filters.make and lot.make and filters.make.lower() not in lot.make.lower():
+    vehicle_text = " ".join(part for part in (lot.title, lot.make, lot.model, lot.trim) if part).lower()
+    if filters.make and filters.make.lower() not in vehicle_text:
         return False
-    if filters.model and lot.model and filters.model.lower() not in lot.model.lower():
+    if filters.model and filters.model.lower() not in vehicle_text:
         return False
-    if filters.year_from and lot.year and lot.year < filters.year_from:
+    if filters.year_from and (lot.year is None or lot.year < filters.year_from):
         return False
-    if filters.year_to and lot.year and lot.year > filters.year_to:
+    if filters.year_to and (lot.year is None or lot.year > filters.year_to):
         return False
     if filters.price_max and lot.current_bid and lot.current_bid > filters.price_max:
         return False
-    if filters.damage and lot.damage and filters.damage.upper() not in lot.damage.upper():
+    if filters.damage and (not lot.damage or filters.damage.upper() not in lot.damage.upper()):
         return False
-    if filters.run_and_drive_only and lot.run_and_drive is False:
+    if filters.run_and_drive_only and lot.run_and_drive is not True:
         return False
     return True
 
@@ -153,13 +206,23 @@ def parse_run_and_drive(raw: dict[str, Any]) -> bool | None:
     direct = raw.get("runAndDrive", raw.get("runsDrives"))
     if isinstance(direct, bool):
         return direct
-    text = " ".join(str(raw.get(key, "")) for key in ("highlights", "condition", "startCode", "status"))
+    text = " ".join(
+        str(raw.get(key, ""))
+        for key in ("highlights", "condition", "startCode", "start_code", "status")
+    )
     upper = text.upper()
     if "RUN" in upper and "DRIVE" in upper:
         return True
     if "ENGINE START" in upper:
         return False
     return None
+
+
+def _pick_nested_str(raw: dict[str, Any], parent: str, key: str) -> str | None:
+    nested = raw.get(parent)
+    if not isinstance(nested, dict):
+        return None
+    return _pick_str(nested, key)
 
 
 def _pick_str(raw: dict[str, Any], *keys: str) -> str | None:

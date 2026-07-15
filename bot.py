@@ -19,7 +19,7 @@ from app.config import Settings, load_settings
 from app.estimators import estimate_lot
 from app.formatting import format_filter, format_lot_report
 from app.models import SearchFilters
-from app.sources.apify_bidcars import ApifyBidCarsSource
+from app.sources.apify_bidcars import ApifyBidCarsSource, ApifySourceError
 from app.storage import Storage
 
 
@@ -39,7 +39,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/check - проверить сейчас\n"
         "/pause - остановить авто-уведомления\n"
         "/resume - включить авто-уведомления\n"
-        "/health - проверить конфиг"
+        "/health - проверить конфиг\n"
+        "/debugcheck - проверить источник лотов"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -58,6 +59,7 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     active_count = len(storage.active_chat_ids())
     text = (
         "<b>Health</b>\n"
+        f"Free MVP mode: <code>{'yes' if settings.free_mvp_mode else 'no'}</code>\n"
         f"Apify actor: <code>{settings.apify_actor}</code>\n"
         f"Check interval: <code>{settings.check_interval_seconds}s</code>\n"
         f"Max lots/check: <code>{settings.max_lots_per_check}</code>\n"
@@ -160,7 +162,16 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.application.bot_data["storage"]
     filters_obj = storage.get_filter(update.effective_chat.id) or SearchFilters()
     msg = await update.effective_message.reply_text("Checking auction lots...")
-    count = await send_lots_to_chat(context, update.effective_chat.id, filters_obj, skip_seen=False)
+    try:
+        count = await send_lots_to_chat(context, update.effective_chat.id, filters_obj, skip_seen=False)
+    except ApifySourceError as exc:
+        await msg.edit_text(f"Source error: {exc}")
+        log.warning("Manual source check failed: %s", exc)
+        return
+    except Exception:
+        await msg.edit_text("Source error: unexpected error. Check Railway logs.")
+        log.exception("Manual source check failed")
+        return
     if count:
         await msg.delete()
     else:
@@ -177,8 +188,12 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     msg = await update.effective_message.reply_text("Running debug check...")
     try:
         lots = await source.fetch_lots(filters_obj, max_items=settings.max_lots_per_check)
+    except ApifySourceError as exc:
+        await msg.edit_text(f"Source error: {exc}")
+        log.warning("Debug check source error: %s", exc)
+        return
     except Exception as exc:
-        await msg.edit_text(f"Apify/source error: {exc}")
+        await msg.edit_text("Source error: unexpected error. Check Railway logs.")
         log.exception("Debug check failed")
         return
 
@@ -190,7 +205,7 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     text = (
         "<b>Debug check</b>\n"
-        f"Fetched from Apify: <b>{len(lots)}</b>\n"
+        f"Fetched from source: <b>{len(lots)}</b>\n"
         f"Unseen: <b>{len(unseen)}</b>\n"
         f"Seen in DB: <b>{len(seen)}</b>\n"
         f"Total seen for this chat: <b>{storage.seen_count(chat_id)}</b>\n\n"
@@ -247,22 +262,19 @@ async def send_lots_to_chat(
 
         try:
             if lot.image_url:
-                await context.bot.send_photo(chat_id=chat_id, photo=lot.image_url)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True,
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard,
-                    disable_web_page_preview=False,
-                )
+                try:
+                    await context.bot.send_photo(chat_id=chat_id, photo=lot.image_url)
+                except Exception as exc:
+                    # Some auction CDNs reject Telegram's image downloader. The lot text is still useful.
+                    log.warning("Could not send image for lot %s: %s", lot.lot_id, exc)
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=bool(lot.image_url),
+            )
             storage.mark_seen(chat_id, lot.lot_id)
             sent += 1
             await asyncio.sleep(0.5)

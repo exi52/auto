@@ -10,6 +10,7 @@ class Settings:
     telegram_bot_token: str
     apify_token: str
     apify_actor: str
+    free_mvp_mode: bool
     check_interval_seconds: int
     max_lots_per_check: int
     bid_cars_extra_query: str
@@ -40,6 +41,18 @@ def _float_env(name: str, default: float) -> float:
         raise RuntimeError(f"{name} must be a number, got {value!r}") from exc
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be true/false, got {value!r}")
+
+
 def load_settings() -> Settings:
     load_dotenv(Path(".env"))
 
@@ -55,12 +68,21 @@ def load_settings() -> Settings:
         joined = ", ".join(missing)
         raise RuntimeError(f"Missing required environment variable(s): {joined}. Copy .env.example to .env and fill them.")
 
+    free_mvp_mode = _bool_env("FREE_MVP_MODE", True)
+    check_interval_seconds = _int_env("CHECK_INTERVAL_SECONDS", 14400)
+    max_lots_per_check = _int_env("MAX_LOTS_PER_CHECK", 10)
+    if free_mvp_mode:
+        # 10 results every 4 hours is about 1,800 paid results per month.
+        check_interval_seconds = max(check_interval_seconds, 14400)
+        max_lots_per_check = min(max(max_lots_per_check, 1), 10)
+
     return Settings(
         telegram_bot_token=telegram_token,
         apify_token=apify_token,
-        apify_actor=os.getenv("APIFY_ACTOR", "lexis-solutions~bid-cars-scraper").strip(),
-        check_interval_seconds=_int_env("CHECK_INTERVAL_SECONDS", 300),
-        max_lots_per_check=_int_env("MAX_LOTS_PER_CHECK", 50),
+        apify_actor=os.getenv("APIFY_ACTOR", "shahidirfan~bid-cars-scraper").strip(),
+        free_mvp_mode=free_mvp_mode,
+        check_interval_seconds=check_interval_seconds,
+        max_lots_per_check=max_lots_per_check,
         bid_cars_extra_query=os.getenv("BID_CARS_EXTRA_QUERY", "").strip(),
         database_path=os.getenv("DATABASE_PATH", "autoscout.sqlite3").strip(),
         default_ocean_shipping_usd=_float_env("DEFAULT_OCEAN_SHIPPING_USD", 1200),
