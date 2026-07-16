@@ -20,6 +20,8 @@ class ApifyBidCarsSource:
         self.actor = actor
         self.extra_query = extra_query
         self.run_url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
+        self.last_raw_count = 0
+        self.last_inactive_count = 0
 
     async def fetch_lots(self, filters: SearchFilters, max_items: int = 20) -> list[Lot]:
         search_url = build_search_url(filters, self.extra_query)
@@ -45,10 +47,18 @@ class ApifyBidCarsSource:
         else:
             raw_items = []
 
+        if not isinstance(raw_items, list):
+            raw_items = []
+        self.last_raw_count = sum(isinstance(item, dict) for item in raw_items)
+        self.last_inactive_count = 0
+
         lots: list[Lot] = []
         lot_ids: set[str] = set()
         for raw in raw_items:
             if not isinstance(raw, dict):
+                continue
+            if not is_current_listing(raw):
+                self.last_inactive_count += 1
                 continue
             lot = normalize_lot(raw)
             if lot and lot.lot_id not in lot_ids and matches_filters(lot, filters):
@@ -94,7 +104,7 @@ def build_actor_input(actor: str, search_url: str, max_items: int) -> dict[str, 
 def build_search_url(filters: SearchFilters, extra_query: str = "") -> str:
     params = {
         "search-type": "filters",
-        "status": "All",
+        "status": "Current",
         "type": "Automobile",
         "make": _title_or_all(filters.make),
         "model": _title_or_all(filters.model),
@@ -106,6 +116,30 @@ def build_search_url(filters: SearchFilters, extra_query: str = "") -> str:
     if extra_query:
         query += "&" + extra_query.lstrip("&?")
     return f"{BID_CARS_BASE}?{query}"
+
+
+def is_current_listing(raw: dict[str, Any]) -> bool:
+    status = _pick_str(raw, "search_status", "auction_status", "lot_status")
+    if status:
+        normalized = status.strip().lower().replace("_", " ").replace("-", " ")
+        return normalized in {
+            "active",
+            "current",
+            "live",
+            "upcoming",
+            "pre bid",
+            "prebid",
+            "buy now",
+        }
+
+    if "time_left_seconds" in raw:
+        seconds = _number_or_none(raw.get("time_left_seconds"))
+        return seconds is not None and seconds > 0
+
+    # Older actor versions may omit status but expose a final bid only after closing.
+    if any(raw.get(key) not in (None, "") for key in ("final_bid", "final_bid_raw", "finalBid")):
+        return False
+    return True
 
 
 def normalize_lot(raw: dict[str, Any]) -> Lot | None:
@@ -250,6 +284,15 @@ def _pick_int(raw: dict[str, Any], *keys: str) -> int | None:
         if match:
             return int(match.group(0))
     return None
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
 
 
 def _pick_money(raw: dict[str, Any], *keys: str) -> float:

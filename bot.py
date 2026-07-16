@@ -205,6 +205,8 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     text = (
         "<b>Debug check</b>\n"
+        f"Raw actor items: <b>{source.last_raw_count}</b>\n"
+        f"Ended skipped: <b>{source.last_inactive_count}</b>\n"
         f"Fetched from source: <b>{len(lots)}</b>\n"
         f"Unseen: <b>{len(unseen)}</b>\n"
         f"Seen in DB: <b>{len(seen)}</b>\n"

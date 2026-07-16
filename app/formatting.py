@@ -31,6 +31,7 @@ def format_lot_report(lot: Lot, estimate: CostEstimate) -> str:
     engine = html.escape(maybe(lot.engine or (f"{lot.engine_cc}cc" if lot.engine_cc else None)))
     odometer = f"{lot.odometer_miles:,} mi" if lot.odometer_miles else "-"
     run_drive = "yes" if lot.run_and_drive is True else "no" if lot.run_and_drive is False else "unknown"
+    sale_date = html.escape(maybe(lot.sale_date))
     parts = ", ".join(estimate.parts_hint[:5])
     risks = "; ".join(estimate.risk_notes) if estimate.risk_notes else "standard auction risk"
 
@@ -38,7 +39,8 @@ def format_lot_report(lot: Lot, estimate: CostEstimate) -> str:
         f"<b>{title}</b>\n"
         f"Damage: <b>{damage}</b> | Run & Drive: <b>{run_drive}</b>\n"
         f"Engine: <b>{engine}</b> | Odometer: <b>{odometer}</b>\n"
-        f"Location: <b>{html.escape(maybe(lot.location))}</b>\n\n"
+        f"Location: <b>{html.escape(maybe(lot.location))}</b>\n"
+        f"Auction closes: <b>{sale_date}</b>\n\n"
         f"<b>Bid guidance</b>\n"
         f"Current bid: <b>{money(estimate.bid)}</b>\n"
         f"Recommended next cap: <b>{money(estimate.recommended_bid_low)} - {money(estimate.recommended_bid_high)}</b>\n\n"
