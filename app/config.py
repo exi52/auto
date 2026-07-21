@@ -14,6 +14,12 @@ class Settings:
     check_interval_seconds: int
     max_lots_per_check: int
     bid_cars_extra_query: str
+    autoria_api_key: str
+    autoria_comparables_limit: int
+    market_cache_hours: int
+    market_negotiation_discount_pct: float
+    target_profit_margin_pct: float
+    target_profit_min_usd: float
     database_path: str
     default_ocean_shipping_usd: float
     default_inland_shipping_usd: float
@@ -71,10 +77,14 @@ def load_settings() -> Settings:
     free_mvp_mode = _bool_env("FREE_MVP_MODE", True)
     check_interval_seconds = _int_env("CHECK_INTERVAL_SECONDS", 14400)
     max_lots_per_check = _int_env("MAX_LOTS_PER_CHECK", 10)
+    autoria_comparables_limit = _int_env("AUTORIA_COMPARABLES_LIMIT", 5)
+    market_cache_hours = _int_env("MARKET_CACHE_HOURS", 24)
     if free_mvp_mode:
         # 10 results every 4 hours is about 1,800 paid results per month.
         check_interval_seconds = max(check_interval_seconds, 14400)
         max_lots_per_check = min(max(max_lots_per_check, 1), 10)
+        autoria_comparables_limit = min(max(autoria_comparables_limit, 3), 5)
+        market_cache_hours = max(market_cache_hours, 24)
 
     return Settings(
         telegram_bot_token=telegram_token,
@@ -84,6 +94,12 @@ def load_settings() -> Settings:
         check_interval_seconds=check_interval_seconds,
         max_lots_per_check=max_lots_per_check,
         bid_cars_extra_query=os.getenv("BID_CARS_EXTRA_QUERY", "").strip(),
+        autoria_api_key=os.getenv("AUTORIA_API_KEY", "").strip(),
+        autoria_comparables_limit=autoria_comparables_limit,
+        market_cache_hours=market_cache_hours,
+        market_negotiation_discount_pct=_float_env("MARKET_NEGOTIATION_DISCOUNT_PCT", 7),
+        target_profit_margin_pct=_float_env("TARGET_PROFIT_MARGIN_PCT", 15),
+        target_profit_min_usd=_float_env("TARGET_PROFIT_MIN_USD", 1500),
         database_path=os.getenv("DATABASE_PATH", "autoscout.sqlite3").strip(),
         default_ocean_shipping_usd=_float_env("DEFAULT_OCEAN_SHIPPING_USD", 1200),
         default_inland_shipping_usd=_float_env("DEFAULT_INLAND_SHIPPING_USD", 600),

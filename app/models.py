@@ -40,6 +40,30 @@ class Lot:
 
 
 @dataclass
+class MarketComparable:
+    listing_id: str
+    title: str
+    year: int | None
+    price_usd: float
+    mileage_km: int | None
+    url: str
+
+
+@dataclass
+class MarketEstimate:
+    source: str
+    make: str
+    model: str
+    sample_size: int
+    median_usd: float
+    low_usd: float
+    high_usd: float
+    expected_sale_usd: float
+    confidence: str
+    comparables: list[MarketComparable] = field(default_factory=list)
+
+
+@dataclass
 class CostEstimate:
     bid: float
     recommended_bid_low: float
@@ -60,3 +84,10 @@ class CostEstimate:
     total_high: float
     parts_hint: list[str]
     risk_notes: list[str]
+    market: MarketEstimate | None = None
+    potential_profit_low: float | None = None
+    potential_profit_base: float | None = None
+    potential_profit_high: float | None = None
+    roi_pct: float | None = None
+    max_profitable_bid: float | None = None
+    deal_rating: str = "UNKNOWN"

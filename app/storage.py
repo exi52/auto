@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -39,6 +41,18 @@ class Storage:
                     run_and_drive_only INTEGER NOT NULL DEFAULT 0,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cache_entries (
+                    namespace TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (namespace, cache_key)
                 )
                 """
             )
@@ -139,3 +153,37 @@ class Storage:
         with self.connect() as conn:
             cursor = conn.execute("DELETE FROM seen_lots WHERE chat_id = ?", (chat_id,))
         return int(cursor.rowcount)
+
+    def get_cache(self, namespace: str, cache_key: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload
+                FROM cache_entries
+                WHERE namespace = ? AND cache_key = ? AND expires_at > ?
+                """,
+                (namespace, cache_key, int(time.time())),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            value = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def set_cache(self, namespace: str, cache_key: str, payload: dict, ttl_hours: int) -> None:
+        expires_at = int(time.time()) + max(1, ttl_hours) * 3600
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cache_entries (namespace, cache_key, payload, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(namespace, cache_key) DO UPDATE SET
+                    payload = excluded.payload,
+                    expires_at = excluded.expires_at,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (namespace, cache_key, encoded, expires_at),
+            )

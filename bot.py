@@ -20,6 +20,7 @@ from app.estimators import estimate_lot
 from app.formatting import format_filter, format_lot_report
 from app.models import SearchFilters
 from app.sources.apify_bidcars import ApifyBidCarsSource, ApifySourceError
+from app.sources.autoria import AutoRiaMarketSource, AutoRiaSourceError
 from app.storage import Storage
 
 
@@ -64,6 +65,10 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Check interval: <code>{settings.check_interval_seconds}s</code>\n"
         f"Max lots/check: <code>{settings.max_lots_per_check}</code>\n"
         f"Extra query: <code>{settings.bid_cars_extra_query or '-'}</code>\n"
+        f"AUTO.RIA market: <code>{'enabled' if settings.autoria_api_key else 'disabled'}</code>\n"
+        f"Market cache: <code>{settings.market_cache_hours}h</code>\n"
+        f"Target profit: <code>max(${settings.target_profit_min_usd:,.0f}, "
+        f"{settings.target_profit_margin_pct:g}%)</code>\n"
         f"Active subscriptions: <code>{active_count}</code>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -182,6 +187,7 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     storage: Storage = context.application.bot_data["storage"]
     settings: Settings = context.application.bot_data["settings"]
     source: ApifyBidCarsSource = context.application.bot_data["source"]
+    market_source: AutoRiaMarketSource = context.application.bot_data["market_source"]
     chat_id = update.effective_chat.id
     filters_obj = storage.get_filter(chat_id) or SearchFilters()
 
@@ -203,6 +209,19 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"{idx + 1}. {lot.lot_id} | {lot.title[:45]} | seen={'yes' if storage.is_seen(chat_id, lot.lot_id) else 'no'}"
         for idx, lot in enumerate(lots[:5])
     )
+    market_debug = "disabled - add AUTORIA_API_KEY"
+    if market_source.enabled and lots:
+        try:
+            market = await market_source.estimate_market(lots[0])
+            if market:
+                market_debug = (
+                    f"{market.sample_size} ads | median {market.median_usd:,.0f} USD | "
+                    f"status={market_source.last_status}"
+                )
+            else:
+                market_debug = market_source.last_status
+        except AutoRiaSourceError as exc:
+            market_debug = str(exc)
     text = (
         "<b>Debug check</b>\n"
         f"Raw actor items: <b>{source.last_raw_count}</b>\n"
@@ -211,6 +230,7 @@ async def cmd_debugcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Unseen: <b>{len(unseen)}</b>\n"
         f"Seen in DB: <b>{len(seen)}</b>\n"
         f"Total seen for this chat: <b>{storage.seen_count(chat_id)}</b>\n\n"
+        f"<b>Ukraine market</b>\n<code>{market_debug}</code>\n\n"
         f"<b>Filter</b>\n{format_filter(filters_obj)}\n\n"
         f"<b>First lots</b>\n<pre>{first or '-'}</pre>"
     )
@@ -250,6 +270,7 @@ async def send_lots_to_chat(
     settings: Settings = context.application.bot_data["settings"]
     storage: Storage = context.application.bot_data["storage"]
     source: ApifyBidCarsSource = context.application.bot_data["source"]
+    market_source: AutoRiaMarketSource = context.application.bot_data["market_source"]
 
     lots = await source.fetch_lots(filters_obj, max_items=settings.max_lots_per_check)
     log.info("Fetched lots for chat_id=%s count=%s skip_seen=%s", chat_id, len(lots), skip_seen)
@@ -258,9 +279,23 @@ async def send_lots_to_chat(
         if skip_seen and storage.is_seen(chat_id, lot.lot_id):
             continue
 
-        estimate = estimate_lot(lot, settings)
+        market = None
+        if market_source.enabled:
+            try:
+                market = await market_source.estimate_market(lot)
+            except AutoRiaSourceError as exc:
+                log.warning("AUTO.RIA market unavailable for lot %s: %s", lot.lot_id, exc)
+            except Exception:
+                log.exception("Unexpected AUTO.RIA market error for lot %s", lot.lot_id)
+
+        estimate = estimate_lot(lot, settings, market)
         text = format_lot_report(lot, estimate)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Open lot", url=lot.url)]])
+        keyboard_rows = [[InlineKeyboardButton("Open lot", url=lot.url)]]
+        if market and market.comparables:
+            keyboard_rows.append(
+                [InlineKeyboardButton("AUTO.RIA comparable", url=market.comparables[0].url)]
+            )
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
 
         try:
             if lot.image_url:
@@ -318,11 +353,19 @@ def build_app(settings: Settings) -> Application:
     storage = Storage(settings.database_path)
     storage.init()
     source = ApifyBidCarsSource(settings.apify_token, settings.apify_actor, settings.bid_cars_extra_query)
+    market_source = AutoRiaMarketSource(
+        api_key=settings.autoria_api_key,
+        storage=storage,
+        comparables_limit=settings.autoria_comparables_limit,
+        cache_hours=settings.market_cache_hours,
+        negotiation_discount_pct=settings.market_negotiation_discount_pct,
+    )
 
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.bot_data["settings"] = settings
     app.bot_data["storage"] = storage
     app.bot_data["source"] = source
+    app.bot_data["market_source"] = market_source
 
     filter_conv = ConversationHandler(
         entry_points=[CommandHandler("filter", cmd_filter)],
